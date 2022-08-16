@@ -237,7 +237,6 @@ def train(rank, gpu, args):
     print('train data size:'+str(len(data_loader)))
     print('val data size:'+str(len(data_loader_val)))
     to_range_0_1 = lambda x: (x + 1.) / 2.
-    crop = transforms.CenterCrop((256, 152))
 
     #networks performing reverse denoising
     netG1 = NCSNpp(args).to(device)
@@ -683,10 +682,6 @@ def train(rank, gpu, args):
             fake_sample1 = sample_from_model(pos_coeff, netG1, args.num_timesteps, x1_t, T, args)            
             fake_sample1 = to_range_0_1(fake_sample1) ; fake_sample1 = fake_sample1/fake_sample1.mean()
             real_data = to_range_0_1(real_data) ; real_data = real_data/real_data.mean()
-            
-            
-            fake_sample1 = crop(fake_sample1) 
-            real_data = crop(real_data)
 
             fake_sample1=fake_sample1.cpu().numpy()
             real_data=real_data.cpu().numpy()
@@ -707,10 +702,6 @@ def train(rank, gpu, args):
             fake_sample1 = to_range_0_1(fake_sample1) ; fake_sample1 = fake_sample1/fake_sample1.mean()
             real_data = to_range_0_1(real_data) ; real_data = real_data/real_data.mean()
             
-            
-            fake_sample1 = crop(fake_sample1) 
-            real_data = crop(real_data)
-
             fake_sample1=fake_sample1.cpu().numpy()
             real_data=real_data.cpu().numpy()
             val_l1_loss[1,epoch,iteration]=abs(fake_sample1 -real_data).mean()

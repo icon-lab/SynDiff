@@ -39,7 +39,7 @@ input_path/
   ├── data_test_contrast2.mat
 ```
 
-where .mat files has shape of (#images, width, height)
+where .mat files has shape of (#images, width, height) and image values are between 0 and 1.0.
 
 ## Train
 

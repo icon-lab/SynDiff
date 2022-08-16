@@ -185,8 +185,8 @@ def sample_and_test(args):
         os.makedirs(save_dir)
     loss1 = np.zeros((1,len(data_loader)))
     loss2 = np.zeros((1,len(data_loader)))
-    syn_im1=np.zeros((256,152,len(data_loader)))
-    syn_im2=np.zeros((256,152,len(data_loader)))
+    syn_im1=np.zeros((256,256,len(data_loader)))
+    syn_im2=np.zeros((256,256,len(data_loader)))
     for iteration, (x , y) in enumerate(data_loader): 
         
         real_data = x.to(device, non_blocking=True)
