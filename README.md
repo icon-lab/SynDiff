@@ -44,19 +44,21 @@ where .mat files has shape of (#images, width, height) and image values are betw
 ## Train
 
 <br />
+
 ```
 python3 train.py --image_size 256 --exp exp_syndiff --num_channels 2 --num_channels_dae 64 --ch_mult 1 1 2 2 4 4 --num_timesteps 4 --num_res_blocks 2 --batch_size 1 --contrast1 T1 --contrast2 T2 --num_epoch 500 --ngf 64 --embedding_type positional --use_ema --ema_decay 0.999 --r1_gamma 1. --z_emb_dim 256 --lr_d 1e-4 --lr_g 1.6e-4 --lazy_reg 10 --num_process_per_node 1 --save_content --local_rank 0 --input_path /input/path/for/data --output_path /output/for/results
 ```
-<br />
-<br />
 
+<br />
 
 ## Test
 
 <br />
+
 ```
 python test.py --image_size 256 --exp exp_syndiff --num_channels 2 --num_channels_dae 64 --ch_mult 1 1 2 2 4 4 --num_timesteps 4 --num_res_blocks 2 --batch_size 1 --embedding_type positional  --z_emb_dim 256 --contrast1 T1  --contrast2 T2 --which_epoch 50 --gpu_chose 0 --input_path /input/path/for/data --output_path /output/for/results
 ```
+
 <br />
 <br />
 
@@ -75,3 +77,9 @@ You are encouraged to modify/distribute this code. However, please acknowledge t
 For any questions, comments and contributions, please contact Muzaffer Özbey (muzafferozbey94[at]gmail.com ) <br />
 
 (c) ICON Lab 2022
+
+<br />
+
+# Acknowledgements
+
+This code uses libraries from the StyleGAN-2 (https://github.com/NVlabs/stylegan2) and DD-GAN (https://github.com/NVlabs/denoising-diffusion-gan) repositories.

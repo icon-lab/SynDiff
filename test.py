@@ -162,16 +162,16 @@ def sample_and_test(args):
                                                shuffle=False,
                                                num_workers=4)
     #Initializing and loading network
-    netG1 = NCSNpp(args).to(device)
-    netG2 = NCSNpp(args).to(device)
+    gen_diffusive_1 = NCSNpp(args).to(device)
+    gen_diffusive_2 = NCSNpp(args).to(device)
 
     exp = args.exp
     output_dir = args.output_path
     exp_path = os.path.join(output_dir,exp)
 
     checkpoint_file = exp_path + "/{}_{}.pth"
-    load_checkpoint(checkpoint_file, netG1,'netG1',epoch=str(epoch_chosen), device = device)
-    load_checkpoint(checkpoint_file, netG2,'netG2',epoch=str(epoch_chosen), device = device)
+    load_checkpoint(checkpoint_file, gen_diffusive_1,'gen_diffusive_1',epoch=str(epoch_chosen), device = device)
+    load_checkpoint(checkpoint_file, gen_diffusive_2,'gen_diffusive_2',epoch=str(epoch_chosen), device = device)
 
 
     T = get_time_schedule(args, device)
@@ -194,7 +194,7 @@ def sample_and_test(args):
         
         x1_t = torch.cat((torch.randn_like(real_data),source_data),axis=1)
         #diffusion steps
-        fake_sample1 = sample_from_model(pos_coeff, netG1, args.num_timesteps, x1_t, T, args)
+        fake_sample1 = sample_from_model(pos_coeff, gen_diffusive_1, args.num_timesteps, x1_t, T, args)
     
         fake_sample1 = to_range_0_1(fake_sample1) ; fake_sample1 = fake_sample1/fake_sample1.max()
         real_data = to_range_0_1(real_data) ; real_data = real_data/real_data.max()
@@ -218,7 +218,7 @@ def sample_and_test(args):
         
         x2_t = torch.cat((torch.randn_like(real_data),source_data),axis=1)
         #diffusion steps
-        fake_sample2 = sample_from_model(pos_coeff, netG2, args.num_timesteps, x2_t, T, args)
+        fake_sample2 = sample_from_model(pos_coeff, gen_diffusive_2, args.num_timesteps, x2_t, T, args)
     
         
         fake_sample2 = to_range_0_1(fake_sample2) ; fake_sample2 = fake_sample2/fake_sample2.max()
