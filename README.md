@@ -84,4 +84,4 @@ For any questions, comments and contributions, please contact Muzaffer Özbey (m
 
 # Acknowledgements
 
-This code uses libraries from, [pGAN](https://github.com/icon-lab/pGAN-cGAN) [StyleGAN-2](https://github.com/NVlabs/stylegan2) and [DD-GAN](https://github.com/NVlabs/denoising-diffusion-gan) repositories.
+This code uses libraries from, [pGAN](https://github.com/icon-lab/pGAN-cGAN), [StyleGAN-2](https://github.com/NVlabs/stylegan2), and [DD-GAN](https://github.com/NVlabs/denoising-diffusion-gan) repositories.
