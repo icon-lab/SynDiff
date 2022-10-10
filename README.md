@@ -4,7 +4,9 @@ Official PyTorch implementation of SynDiff described in the [paper](https://arxi
 
 Muzaffer Özbey, Salman UH Dar, Hasan A Bedel, Onat Dalmaz, Şaban Özturk, Alper Güngör, Tolga Çukur, "Unsupervised Medical Image Translation with Adversarial Diffusion Models", arXiv 2022.
 
-<img src="./figures/syndiff.png" width="600px">
+<img src="./figures/adv_diff v2.png" width="600px">
+
+<img src="./figures/syndiff v2 quality.png" width="600px">
 
 ## Dependencies
 
@@ -82,4 +84,4 @@ For any questions, comments and contributions, please contact Muzaffer Özbey (m
 
 # Acknowledgements
 
-This code uses libraries from the StyleGAN-2 (https://github.com/NVlabs/stylegan2) and DD-GAN (https://github.com/NVlabs/denoising-diffusion-gan) repositories.
+This code uses libraries from, [pGAN](https://github.com/icon-lab/pGAN-cGAN) [StyleGAN-2](https://github.com/NVlabs/stylegan2) and [DD-GAN](https://github.com/NVlabs/denoising-diffusion-gan) repositories.
