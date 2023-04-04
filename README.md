@@ -71,11 +71,13 @@ python test.py --image_size 256 --exp exp_syndiff --num_channels 2 --num_channel
 # Citation
 You are encouraged to modify/distribute this code. However, please acknowledge this code and cite the paper appropriately.
 ```
-@article{ozbey2022unsupervised,
-  title={Unsupervised Medical Image Translation with Adversarial Diffusion Models},
-  author={{\"O}zbey, Muzaffer and Dar, Salman UH and Bedel, Hasan A and Dalmaz, Onat and {\"O}zturk, {\c{S}}aban and G{\"u}ng{\"o}r, Alper and {\c{C}}ukur, Tolga},
-  journal={arXiv preprint arXiv:2207.08208},
-  year={2022}
+@misc{özbey2023unsupervised,
+      title={Unsupervised Medical Image Translation with Adversarial Diffusion Models}, 
+      author={Muzaffer Özbey and Onat Dalmaz and Salman UH Dar and Hasan A Bedel and Şaban Özturk and Alper Güngör and Tolga Çukur},
+      year={2023},
+      eprint={2207.08208},
+      archivePrefix={arXiv},
+      primaryClass={eess.IV}
 }
 
 ```
