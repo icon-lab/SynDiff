@@ -42,7 +42,7 @@ input_path/
 ```
 
 where .mat files has shape of (#images, width, height) and image values are between 0 and 1.0. 
-# Sample Data
+### Sample Data
 Sample toy data can also found under 'SynDiff_sample_data' folder of the repository. 
 
 
