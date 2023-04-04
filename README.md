@@ -73,7 +73,7 @@ python test.py --image_size 256 --exp exp_syndiff --num_channels 2 --num_channel
 
 
 # Citation
-Preliminary versions of SynDiff are presented in [NeurIPS Medical Imaging Meets](https://www.cse.cuhk.edu.hk/~qdou/public/medneurips2022/105.pdf) and IEEE ISBI 2023.
+Preliminary versions of SynDiff are presented in [MICCAI DeCaF](https://link.springer.com/chapter/10.1007/978-3-031-18523-6_8),  [NeurIPS Medical Imaging Meets](https://www.cse.cuhk.edu.hk/~qdou/public/medneurips2022/103.pdf) (Oral), and IEEE ISBI 2023.
 You are encouraged to modify/distribute this code. However, please acknowledge this code and cite the paper appropriately.
 ```
 @misc{özbey2023unsupervised,
