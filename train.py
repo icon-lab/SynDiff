@@ -1,10 +1,13 @@
-
+import sys
+path_to_pip_installs = "/tmp/test_env"
+if path_to_pip_installs not in sys.path:
+    sys.path.insert(0, path_to_pip_installs)
 
 import argparse
 import torch
 import numpy as np
-
 import os
+import copy
 
 import torch.autograd as autograd
 import torch.nn as nn
@@ -20,6 +23,8 @@ import torch.distributed as dist
 import shutil
 from skimage.metrics import peak_signal_noise_ratio as psnr
 
+def _finite(*tensors):
+    return all([torch.isfinite(t).all() for t in tensors if t is not None])
 
 
 def copy_source(file, output_dir):
@@ -70,10 +75,12 @@ def get_sigma_schedule(args, device):
         var = var_func_vp(t, beta_min, beta_max)
     alpha_bars = 1.0 - var
     betas = 1 - alpha_bars[1:] / alpha_bars[:-1]
+
     
     first = torch.tensor(1e-8)
     betas = torch.cat((first[None], betas)).to(device)
     betas = betas.type(torch.float32)
+    betas = betas.clamp_(min=1e-8, max=0.999)  # NEWWW
     sigmas = betas**0.5
     a_s = torch.sqrt(1-betas)
     return sigmas, a_s, betas
@@ -181,7 +188,6 @@ def sample_from_model(coefficients, generator, n_time, x_init, T, opt):
         
     return x
 
-#%%
 def train_syndiff(rank, gpu, args):
 
     
@@ -239,6 +245,10 @@ def train_syndiff(rank, gpu, args):
     to_range_0_1 = lambda x: (x + 1.) / 2.
 
     #networks performing reverse denoising
+    #args_diff = copy.deepcopy(args)
+    #args_diff.num_channels = 2
+    print("Creating networks...")
+    print("Num channels for NCSNpp: ", args.num_channels)
     gen_diffusive_1 = NCSNpp(args).to(device)
     gen_diffusive_2 = NCSNpp(args).to(device)  
     #networks performing translation
@@ -366,7 +376,7 @@ def train_syndiff(rank, gpu, args):
         global_step, epoch, init_epoch = 0, 0, 0
     
     
-    for epoch in range(init_epoch, args.num_epoch+1):
+    for epoch in range(init_epoch, args.num_epoch):
         train_sampler.set_epoch(epoch)
        
         for iteration, (x1, x2) in enumerate(data_loader):
@@ -405,6 +415,17 @@ def train_syndiff(rank, gpu, args):
             errD2_real = F.softplus(-D2_real)
             errD2_real = errD2_real.mean()   
             errD_real = errD1_real + errD2_real
+
+
+
+            if not _finite(errD_real): # NEWW
+                if rank == 0:
+                    print("[warn] non-finite errD_real; skipping batch")
+                disc_diffusive_1.zero_grad(set_to_none=True)
+                disc_diffusive_2.zero_grad(set_to_none=True)
+                continue # NEWW
+
+
             errD_real.backward(retain_graph=True)
             
             if args.lazy_reg is None:
@@ -422,6 +443,13 @@ def train_syndiff(rank, gpu, args):
                                 ).mean()                
                 
                 grad_penalty = args.r1_gamma / 2 * grad1_penalty + args.r1_gamma / 2 * grad2_penalty
+
+                if not _finite(grad_penalty):
+                    if rank == 0:
+                        print("[warn] non-finite grad_penalty; skipping batch")
+                    disc_diffusive_1.zero_grad(set_to_none=True)
+                    disc_diffusive_2.zero_grad(set_to_none=True)
+                    continue # NEWW
                 grad_penalty.backward()
             else:
                 if global_step % args.lazy_reg == 0:
@@ -462,6 +490,13 @@ def train_syndiff(rank, gpu, args):
             errD1_fake = F.softplus(output1)
             errD2_fake = F.softplus(output2)
             errD_fake = errD1_fake.mean() + errD2_fake.mean()
+
+            if not _finite(errD_fake): # NEW
+                if rank == 0:
+                    print("[warn] non-finite errD_fake; skipping batch")
+                disc_diffusive_1.zero_grad(set_to_none=True)
+                disc_diffusive_2.zero_grad(set_to_none=True)
+                continue # NEWW
             errD_fake.backward()    
             
             errD = errD_real + errD_fake
@@ -582,6 +617,15 @@ def train_syndiff(rank, gpu, args):
             torch.autograd.set_detect_anomaly(True)
             
             errG = args.lambda_l1_loss*errG_cycle +  errG_adv + errG_cycle_adv + args.lambda_l1_loss*errG_L1
+
+            if not _finite(errG):
+                if rank == 0:
+                    print("[warn] non-finite errG; skipping batch")
+                gen_diffusive_1.zero_grad(set_to_none=True)
+                gen_diffusive_2.zero_grad(set_to_none=True)
+                gen_non_diffusive_1to2.zero_grad(set_to_none=True)
+                gen_non_diffusive_2to1.zero_grad(set_to_none=True)
+                continue # NEWW
             errG.backward()
             
             optimizer_gen_diffusive_1.step()
@@ -674,14 +718,14 @@ def train_syndiff(rank, gpu, args):
 
         for iteration, (x_val , y_val) in enumerate(data_loader_val): 
         
-            real_data = x_val.to(device, non_blocking=True)
-            source_data = y_val.to(device, non_blocking=True)
+            real_data = x_val.to(device, non_blocking=True) # contrast1
+            source_data = y_val.to(device, non_blocking=True) # contrast2
             
             x1_t = torch.cat((torch.randn_like(real_data),source_data),axis=1)
             #diffusion steps
             fake_sample1 = sample_from_model(pos_coeff, gen_diffusive_1, args.num_timesteps, x1_t, T, args)            
-            fake_sample1 = to_range_0_1(fake_sample1) ; fake_sample1 = fake_sample1/fake_sample1.mean()
-            real_data = to_range_0_1(real_data) ; real_data = real_data/real_data.mean()
+            fake_sample1 = to_range_0_1(fake_sample1) ; #fake_sample1 = fake_sample1/fake_sample1.mean() # synthetic contrast1
+            real_data = to_range_0_1(real_data) #; real_data = real_data/real_data.mean()
 
             fake_sample1=fake_sample1.cpu().numpy()
             real_data=real_data.cpu().numpy()
@@ -695,12 +739,12 @@ def train_syndiff(rank, gpu, args):
             source_data = y_val.to(device, non_blocking=True)
             
             x1_t = torch.cat((torch.randn_like(real_data),source_data),axis=1)
-            #diffusion steps
-            fake_sample1 = sample_from_model(pos_coeff, gen_diffusive_1, args.num_timesteps, x1_t, T, args)
+            #diffusion steps (gen_diffusive_2 ????)
+            fake_sample1 = sample_from_model(pos_coeff, gen_diffusive_2, args.num_timesteps, x1_t, T, args)
 
             
-            fake_sample1 = to_range_0_1(fake_sample1) ; fake_sample1 = fake_sample1/fake_sample1.mean()
-            real_data = to_range_0_1(real_data) ; real_data = real_data/real_data.mean()
+            fake_sample1 = to_range_0_1(fake_sample1) ; #fake_sample1 = fake_sample1/fake_sample1.mean()
+            real_data = to_range_0_1(real_data) #; real_data = real_data/real_data.mean()
             
             fake_sample1=fake_sample1.cpu().numpy()
             real_data=real_data.cpu().numpy()
@@ -708,7 +752,10 @@ def train_syndiff(rank, gpu, args):
             
             val_psnr_values[1,epoch, iteration] = psnr(real_data,fake_sample1, data_range=real_data.max())
 
+        print("Validation PSNR Values:")
+        print("Class 1:")
         print(np.nanmean(val_psnr_values[0,epoch,:]))
+        print("Class 2:")
         print(np.nanmean(val_psnr_values[1,epoch,:]))
         np.save('{}/val_l1_loss.npy'.format(exp_path), val_l1_loss)
         np.save('{}/val_psnr_values.npy'.format(exp_path), val_psnr_values)               
@@ -727,8 +774,9 @@ def init_processes(rank, size, fn, args):
 
 def cleanup():
     dist.destroy_process_group()    
-#%%
+
 if __name__ == '__main__':
+    print('Syndiff training script')
     parser = argparse.ArgumentParser('syndiff parameters')
     parser.add_argument('--seed', type=int, default=1024,
                         help='seed used for initialization')
@@ -737,7 +785,7 @@ if __name__ == '__main__':
     
     parser.add_argument('--image_size', type=int, default=32,
                             help='size of image')
-    parser.add_argument('--num_channels', type=int, default=3,
+    parser.add_argument('--num_channels', type=int, default=2,
                             help='channel of image')
     parser.add_argument('--centered', action='store_false', default=True,
                             help='-1,1 scale')
@@ -799,7 +847,7 @@ if __name__ == '__main__':
     parser.add_argument('--ngf', type=int, default=64)
 
     parser.add_argument('--lr_g', type=float, default=1.5e-4, help='learning rate g')
-    parser.add_argument('--lr_d', type=float, default=1e-4, help='learning rate d')
+    parser.add_argument('--lr_d', type=float, default=0.5e-4, help='learning rate d')
     parser.add_argument('--beta1', type=float, default=0.5,
                             help='beta1 for adam')
     parser.add_argument('--beta2', type=float, default=0.9,

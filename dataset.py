@@ -5,10 +5,10 @@ import random
 
 def CreateDatasetSynthesis(phase, input_path, contrast1 = 'T1', contrast2 = 'T2'):
 
-    target_file = input_path + "/data_{}_{}.mat".format(phase, contrast1)
+    target_file = input_path + "/data_{}_{}.h5".format(phase, contrast1)
     data_fs_s1=LoadDataSet(target_file)
     
-    target_file = input_path + "/data_{}_{}.mat".format(phase, contrast2)
+    target_file = input_path + "/data_{}_{}.h5".format(phase, contrast2)
     data_fs_s2=LoadDataSet(target_file)
 
     dataset=torch.utils.data.TensorDataset(torch.from_numpy(data_fs_s1),torch.from_numpy(data_fs_s2))  

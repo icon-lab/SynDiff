@@ -2,3 +2,13 @@
 *pycache*
 saved_info/*
 saved_info
+slurm/outputs/*
+synthetic_data/*
+.DS_Store
+pretrained/*
+wandb/*
+data/*
+results/*
+debug.ipynb
+.env
+old/*

@@ -1,4 +1,4 @@
-# SynDiff
+# SynDiff (Original ReadMe)
 
 Official PyTorch implementation of SynDiff described in the [paper](https://ieeexplore.ieee.org/document/10167641).
 

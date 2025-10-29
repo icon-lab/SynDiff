@@ -1,4 +1,11 @@
 
+
+
+import sys
+path_to_pip_installs = "/tmp/test_env"
+if path_to_pip_installs not in sys.path:
+    sys.path.insert(0, path_to_pip_installs)
+
 import argparse
 import torch
 import numpy as np, h5py
@@ -180,7 +187,7 @@ def sample_and_test(args):
          
     save_dir = exp_path + "/generated_samples/epoch_{}".format(epoch_chosen)
     
-    crop = transforms.CenterCrop((256, 152))
+    #crop = transforms.CenterCrop((256, 152))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     loss1 = np.zeros((1,len(data_loader)))
@@ -201,9 +208,9 @@ def sample_and_test(args):
         source_data = to_range_0_1(source_data); source_data = source_data/source_data.max() 
         
         
-        fake_sample1 = crop(fake_sample1) 
-        real_data = crop(real_data)
-        source_data = crop(source_data) 
+        #fake_sample1 = crop(fake_sample1) 
+        #real_data = crop(real_data)
+        #source_data = crop(source_data) 
         syn_im1[:,:,iteration]=np.squeeze(fake_sample1.cpu().numpy())
         
         loss1[0, iteration] = psnr(fake_sample1, real_data).cpu().numpy()
@@ -227,9 +234,9 @@ def sample_and_test(args):
         
         
         
-        fake_sample2 = crop(fake_sample2) 
-        real_data = crop(real_data)
-        source_data = crop(source_data)
+        #fake_sample2 = crop(fake_sample2) 
+        #real_data = crop(real_data)
+        #source_data = crop(source_data)
         syn_im2[:,:,iteration]=np.squeeze(fake_sample2.cpu().numpy()) 
         
         loss2[0, iteration] = psnr(fake_sample2, real_data).cpu().numpy()
@@ -339,6 +346,8 @@ if __name__ == '__main__':
     parser.add_argument('--source', type=str, default='T2',
                         help='source contrast')   
     args = parser.parse_args()
+    # print all args
+    print(args)
     
     sample_and_test(args)
     

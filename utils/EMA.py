@@ -12,6 +12,7 @@ import warnings
 
 import torch
 from torch.optim import Optimizer
+from collections import OrderedDict
 
 
 class EMA(Optimizer):
@@ -21,6 +22,8 @@ class EMA(Optimizer):
         self.optimizer = opt
         self.state = opt.state
         self.param_groups = opt.param_groups
+        self._optimizer_state_dict_pre_hooks  = OrderedDict()
+        self._optimizer_state_dict_post_hooks = OrderedDict()
 
     def step(self, *args, **kwargs):
         retval = self.optimizer.step(*args, **kwargs)
