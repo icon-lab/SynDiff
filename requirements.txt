@@ -1,0 +1,18 @@
+# Runtime dependencies.
+#
+# torch>=1.13 is required because train.py passes weights_only to torch.load;
+# the argument was introduced in that release. PyTorch 2.6 flipped its default
+# to True, which is why passing it explicitly matters.
+torch>=1.13
+torchvision>=0.14
+numpy
+h5py
+scikit-image
+
+# Optional: needed only to JIT-build the fused CUDA kernels in utils/op.
+# Without it (or without a matching CUDA toolchain) SynDiff warns once and
+# falls back to the equivalent pure-PyTorch implementations.
+ninja
+
+# Tests
+pytest

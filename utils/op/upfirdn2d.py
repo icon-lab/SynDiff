@@ -7,6 +7,7 @@ The license for the original version of this file can be found in this directory
 """
 
 import os
+import warnings
 
 import torch
 from torch.nn import functional as F
@@ -15,13 +16,24 @@ from torch.utils.cpp_extension import load
 from collections import abc
 
 module_path = os.path.dirname(__file__)
-upfirdn2d_op = load(
-    "upfirdn2d",
-    sources=[
-        os.path.join(module_path, "upfirdn2d.cpp"),
-        os.path.join(module_path, "upfirdn2d_kernel.cu"),
-    ],
-)
+
+# Building the upfirdn2d CUDA kernel requires ninja and a matching CUDA
+# toolchain. Neither is available on CPU-only installs, so fall back to the
+# native PyTorch implementation below instead of failing at import time.
+try:
+    upfirdn2d_op = load(
+        "upfirdn2d",
+        sources=[
+            os.path.join(module_path, "upfirdn2d.cpp"),
+            os.path.join(module_path, "upfirdn2d_kernel.cu"),
+        ],
+    )
+except Exception as e:  # pragma: no cover - depends on the local toolchain
+    warnings.warn(
+        "Could not build the upfirdn2d CUDA extension ({}). "
+        "Falling back to the native PyTorch implementation.".format(e)
+    )
+    upfirdn2d_op = None
 
 
 class UpFirDn2dBackward(Function):
@@ -151,7 +163,7 @@ class UpFirDn2d(Function):
 
 
 def upfirdn2d(input, kernel, up=1, down=1, pad=(0, 0)):
-    if input.device.type == "cpu":
+    if upfirdn2d_op is None or input.device.type == "cpu":
         out = upfirdn2d_native(
             input, kernel, up, up, down, down, pad[0], pad[1], pad[0], pad[1]
         )
@@ -173,7 +185,7 @@ def upfirdn2d_ada(input, kernel, up=1, down=1, pad=(0, 0)):
     if len(pad) == 2:
         pad = (pad[0], pad[1], pad[0], pad[1])
 
-    if input.device.type == "cpu":
+    if upfirdn2d_op is None or input.device.type == "cpu":
         out = upfirdn2d_native(input, kernel, *up, *down, *pad)
 
     else:

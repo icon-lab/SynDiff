@@ -13,6 +13,9 @@ import torch.optim as optim
 import torchvision
 
 import torchvision.transforms as transforms
+from diffusion import (Diffusion_Coefficients, Posterior_Coefficients,
+                       get_time_schedule, q_sample_pairs, sample_from_model,
+                       sample_posterior)
 from dataset import CreateDatasetSynthesis
 
 from torch.multiprocessing import Process
@@ -26,160 +29,52 @@ def copy_source(file, output_dir):
     shutil.copyfile(file, os.path.join(output_dir, os.path.basename(file)))
             
 def broadcast_params(params):
+    if not dist.is_initialized():
+        return
     for param in params:
         dist.broadcast(param.data, src=0)
 
 
-#%% Diffusion coefficients 
-def var_func_vp(t, beta_min, beta_max):
-    log_mean_coeff = -0.25 * t ** 2 * (beta_max - beta_min) - 0.5 * t * beta_min
-    var = 1. - torch.exp(2. * log_mean_coeff)
-    return var
+def resolve_device(gpu):
+    """Pick the training device, falling back to CPU when CUDA is unavailable."""
+    if torch.cuda.is_available():
+        return torch.device('cuda:{}'.format(gpu))
+    return torch.device('cpu')
 
-def var_func_geometric(t, beta_min, beta_max):
-    return beta_min * ((beta_max / beta_min) ** t)
 
-def extract(input, t, shape):
-    out = torch.gather(input, 0, t)
-    reshape = [shape[0]] + [1] * (len(shape) - 1)
-    out = out.reshape(*reshape)
+def maybe_ddp(model, device_ids):
+    """Wrap in DistributedDataParallel only when a process group is active.
 
-    return out
-
-def get_time_schedule(args, device):
-    n_timestep = args.num_timesteps
-    eps_small = 1e-3
-    t = np.arange(0, n_timestep + 1, dtype=np.float64)
-    t = t / n_timestep
-    t = torch.from_numpy(t) * (1. - eps_small)  + eps_small
-    return t.to(device)
-
-def get_sigma_schedule(args, device):
-    n_timestep = args.num_timesteps
-    beta_min = args.beta_min
-    beta_max = args.beta_max
-    eps_small = 1e-3
-   
-    t = np.arange(0, n_timestep + 1, dtype=np.float64)
-    t = t / n_timestep
-    t = torch.from_numpy(t) * (1. - eps_small) + eps_small
-    
-    if args.use_geometric:
-        var = var_func_geometric(t, beta_min, beta_max)
-    else:
-        var = var_func_vp(t, beta_min, beta_max)
-    alpha_bars = 1.0 - var
-    betas = 1 - alpha_bars[1:] / alpha_bars[:-1]
-    
-    first = torch.tensor(1e-8)
-    betas = torch.cat((first[None], betas)).to(device)
-    betas = betas.type(torch.float32)
-    sigmas = betas**0.5
-    a_s = torch.sqrt(1-betas)
-    return sigmas, a_s, betas
-
-class Diffusion_Coefficients():
-    def __init__(self, args, device):
-                
-        self.sigmas, self.a_s, _ = get_sigma_schedule(args, device=device)
-        self.a_s_cum = np.cumprod(self.a_s.cpu())
-        self.sigmas_cum = np.sqrt(1 - self.a_s_cum ** 2)
-        self.a_s_prev = self.a_s.clone()
-        self.a_s_prev[-1] = 1
-        
-        self.a_s_cum = self.a_s_cum.to(device)
-        self.sigmas_cum = self.sigmas_cum.to(device)
-        self.a_s_prev = self.a_s_prev.to(device)
-    
-def q_sample(coeff, x_start, t, *, noise=None):
+    Single-process runs keep the bare module, so the saved state_dict has no
+    'module.' prefix; load_checkpoint() in test.py handles both layouts.
     """
-    Diffuse the data (t == 0 means diffused for t step)
-    """
-    if noise is None:
-      noise = torch.randn_like(x_start)
-      
-    x_t = extract(coeff.a_s_cum, t, x_start.shape) * x_start + \
-          extract(coeff.sigmas_cum, t, x_start.shape) * noise
-    
-    return x_t
+    if not dist.is_initialized():
+        return model
+    return nn.parallel.DistributedDataParallel(model, device_ids=device_ids or None)
 
-def q_sample_pairs(coeff, x_start, t):
-    """
-    Generate a pair of disturbed images for training
-    :param x_start: x_0
-    :param t: time step t
-    :return: x_t, x_{t+1}
-    """
-    noise = torch.randn_like(x_start)
-    x_t = q_sample(coeff, x_start, t)
-    x_t_plus_one = extract(coeff.a_s, t+1, x_start.shape) * x_t + \
-                   extract(coeff.sigmas, t+1, x_start.shape) * noise
-    
-    return x_t, x_t_plus_one
-#%% posterior sampling
-class Posterior_Coefficients():
-    def __init__(self, args, device):
-        
-        _, _, self.betas = get_sigma_schedule(args, device=device)
-        
-        #we don't need the zeros
-        self.betas = self.betas.type(torch.float32)[1:]
-        
-        self.alphas = 1 - self.betas
-        self.alphas_cumprod = torch.cumprod(self.alphas, 0)
-        self.alphas_cumprod_prev = torch.cat(
-                                    (torch.tensor([1.], dtype=torch.float32,device=device), self.alphas_cumprod[:-1]), 0
-                                        )               
-        self.posterior_variance = self.betas * (1 - self.alphas_cumprod_prev) / (1 - self.alphas_cumprod)
-        
-        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-        self.sqrt_recip_alphas_cumprod = torch.rsqrt(self.alphas_cumprod)
-        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1 / self.alphas_cumprod - 1)
-        
-        self.posterior_mean_coef1 = (self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1 - self.alphas_cumprod))
-        self.posterior_mean_coef2 = ((1 - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1 - self.alphas_cumprod))
-        
-        self.posterior_log_variance_clipped = torch.log(self.posterior_variance.clamp(min=1e-20))
-        
-def sample_posterior(coefficients, x_0,x_t, t):
-    
-    def q_posterior(x_0, x_t, t):
-        mean = (
-            extract(coefficients.posterior_mean_coef1, t, x_t.shape) * x_0
-            + extract(coefficients.posterior_mean_coef2, t, x_t.shape) * x_t
-        )
-        var = extract(coefficients.posterior_variance, t, x_t.shape)
-        log_var_clipped = extract(coefficients.posterior_log_variance_clipped, t, x_t.shape)
-        return mean, var, log_var_clipped
-    
-  
-    def p_sample(x_0, x_t, t):
-        mean, _, log_var = q_posterior(x_0, x_t, t)
-        
-        noise = torch.randn_like(x_t)
-        
-        nonzero_mask = (1 - (t == 0).type(torch.float32))
 
-        return mean + nonzero_mask[:,None,None,None] * torch.exp(0.5 * log_var) * noise
-            
-    sample_x_pos = p_sample(x_0, x_t, t)
-    
-    return sample_x_pos
+def strip_module_prefix(state_dict):
+    """Drop the 'module.' prefixes that parallel wrappers add to every key.
 
-def sample_from_model(coefficients, generator, n_time, x_init, T, opt):
-    x = x_init[:,[0],:]
-    source = x_init[:,[1],:]
-    with torch.no_grad():
-        for i in reversed(range(n_time)):
-            t = torch.full((x.size(0),), i, dtype=torch.int64).to(x.device)
-          
-            t_time = t
-            latent_z = torch.randn(x.size(0), opt.nz, device=x.device)#.to(x.device)
-            x_0 = generator(torch.cat((x,source),axis=1), t_time, latent_z)
-            x_new = sample_posterior(coefficients, x_0[:,[0],:], x, t)
-            x = x_new.detach()
-        
-    return x
+    Checkpoints carry one prefix per wrapper the saving run used: none for a
+    single-process run, one for DistributedDataParallel, and two for the
+    DDP-over-DataParallel nesting older revisions produced.
+    """
+    prefix = 'module.'
+    stripped = {}
+    for key, value in state_dict.items():
+        while key.startswith(prefix):
+            key = key[len(prefix):]
+        stripped[key] = value
+    return stripped
+
+
+def load_model_state(model, state_dict):
+    """Load a state_dict saved with or without the DDP 'module.' prefix."""
+    target = model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
+    target.load_state_dict(strip_module_prefix(state_dict))
+
+
 
 #%%
 def train_syndiff(rank, gpu, args):
@@ -197,17 +92,20 @@ def train_syndiff(rank, gpu, args):
     #rank = args.node_rank * args.num_process_per_node + gpu
     
     torch.manual_seed(args.seed + rank)
-    torch.cuda.manual_seed(args.seed + rank)
-    torch.cuda.manual_seed_all(args.seed + rank)
-    device = torch.device('cuda:{}'.format(gpu))
-    
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed + rank)
+        torch.cuda.manual_seed_all(args.seed + rank)
+    device = resolve_device(gpu)
+    # gpu_ids/device_ids are only meaningful for CUDA runs
+    gpu_ids = [gpu] if device.type == 'cuda' else []
+
     batch_size = args.batch_size
     
     nz = args.nz #latent dimension
     
 
-    dataset = CreateDatasetSynthesis(phase = "train", input_path = args.input_path, contrast1 = args.contrast1, contrast2 = args.contrast2)
-    dataset_val = CreateDatasetSynthesis(phase = "val", input_path = args.input_path, contrast1 = args.contrast1, contrast2 = args.contrast2 )
+    dataset = CreateDatasetSynthesis(phase = "train", input_path = args.input_path, contrast1 = args.contrast1, contrast2 = args.contrast2, image_size = args.image_size)
+    dataset_val = CreateDatasetSynthesis(phase = "val", input_path = args.input_path, contrast1 = args.contrast1, contrast2 = args.contrast2, image_size = args.image_size )
 
 
     
@@ -232,8 +130,10 @@ def train_syndiff(rank, gpu, args):
                                                sampler=val_sampler,
                                                drop_last = True)
 
-    val_l1_loss=np.zeros([2,args.num_epoch,len(data_loader_val)])
-    val_psnr_values=np.zeros([2,args.num_epoch,len(data_loader_val)])
+    # the epoch loop below runs over range(init_epoch, args.num_epoch + 1),
+    # so epoch args.num_epoch needs a slot too
+    val_l1_loss=np.zeros([2,args.num_epoch+1,len(data_loader_val)])
+    val_psnr_values=np.zeros([2,args.num_epoch+1,len(data_loader_val)])
     print('train data size:'+str(len(data_loader)))
     print('val data size:'+str(len(data_loader_val)))
     to_range_0_1 = lambda x: (x + 1.) / 2.
@@ -242,9 +142,8 @@ def train_syndiff(rank, gpu, args):
     gen_diffusive_1 = NCSNpp(args).to(device)
     gen_diffusive_2 = NCSNpp(args).to(device)  
     #networks performing translation
-    args.num_channels=1
-    gen_non_diffusive_1to2 = backbones.generator_resnet.define_G(netG='resnet_6blocks',gpu_ids=[gpu])
-    gen_non_diffusive_2to1 = backbones.generator_resnet.define_G(netG='resnet_6blocks',gpu_ids=[gpu])
+    gen_non_diffusive_1to2 = backbones.generator_resnet.define_G(netG='resnet_6blocks',ngf=args.ngf,gpu_ids=gpu_ids)
+    gen_non_diffusive_2to1 = backbones.generator_resnet.define_G(netG='resnet_6blocks',ngf=args.ngf,gpu_ids=gpu_ids)
     
     disc_diffusive_1 = Discriminator_large(nc = 2, ngf = args.ngf, 
                                    t_emb_dim = args.t_emb_dim,
@@ -253,8 +152,8 @@ def train_syndiff(rank, gpu, args):
                                    t_emb_dim = args.t_emb_dim,
                                    act=nn.LeakyReLU(0.2)).to(device)
     
-    disc_non_diffusive_cycle1 = backbones.generator_resnet.define_D(gpu_ids=[gpu])
-    disc_non_diffusive_cycle2 = backbones.generator_resnet.define_D(gpu_ids=[gpu])
+    disc_non_diffusive_cycle1 = backbones.generator_resnet.define_D(ndf=args.ngf,gpu_ids=gpu_ids)
+    disc_non_diffusive_cycle2 = backbones.generator_resnet.define_D(ndf=args.ngf,gpu_ids=gpu_ids)
     
     broadcast_params(gen_diffusive_1.parameters())
     broadcast_params(gen_diffusive_2.parameters())
@@ -299,15 +198,15 @@ def train_syndiff(rank, gpu, args):
     
     
     #ddp
-    gen_diffusive_1 = nn.parallel.DistributedDataParallel(gen_diffusive_1, device_ids=[gpu])
-    gen_diffusive_2 = nn.parallel.DistributedDataParallel(gen_diffusive_2, device_ids=[gpu])
-    gen_non_diffusive_1to2 = nn.parallel.DistributedDataParallel(gen_non_diffusive_1to2, device_ids=[gpu])
-    gen_non_diffusive_2to1 = nn.parallel.DistributedDataParallel(gen_non_diffusive_2to1, device_ids=[gpu])    
-    disc_diffusive_1 = nn.parallel.DistributedDataParallel(disc_diffusive_1, device_ids=[gpu])
-    disc_diffusive_2 = nn.parallel.DistributedDataParallel(disc_diffusive_2, device_ids=[gpu])
+    gen_diffusive_1 = maybe_ddp(gen_diffusive_1, gpu_ids)
+    gen_diffusive_2 = maybe_ddp(gen_diffusive_2, gpu_ids)
+    gen_non_diffusive_1to2 = maybe_ddp(gen_non_diffusive_1to2, gpu_ids)
+    gen_non_diffusive_2to1 = maybe_ddp(gen_non_diffusive_2to1, gpu_ids)
+    disc_diffusive_1 = maybe_ddp(disc_diffusive_1, gpu_ids)
+    disc_diffusive_2 = maybe_ddp(disc_diffusive_2, gpu_ids)
 
-    disc_non_diffusive_cycle1 = nn.parallel.DistributedDataParallel(disc_non_diffusive_cycle1, device_ids=[gpu])
-    disc_non_diffusive_cycle2 = nn.parallel.DistributedDataParallel(disc_non_diffusive_cycle2, device_ids=[gpu])
+    disc_non_diffusive_cycle1 = maybe_ddp(disc_non_diffusive_cycle1, gpu_ids)
+    disc_non_diffusive_cycle2 = maybe_ddp(disc_non_diffusive_cycle2, gpu_ids)
     
     exp = args.exp
     output_path = args.output_path
@@ -326,13 +225,15 @@ def train_syndiff(rank, gpu, args):
     
     if args.resume:
         checkpoint_file = os.path.join(exp_path, 'content.pth')
-        checkpoint = torch.load(checkpoint_file, map_location=device)
+        # content.pth stores the argparse.Namespace alongside the tensors, so it
+        # cannot be read under the weights_only=True default of torch>=2.6.
+        checkpoint = torch.load(checkpoint_file, map_location=device, weights_only=False)
         init_epoch = checkpoint['epoch']
         epoch = init_epoch
-        gen_diffusive_1.load_state_dict(checkpoint['gen_diffusive_1_dict'])
-        gen_diffusive_2.load_state_dict(checkpoint['gen_diffusive_2_dict'])
-        gen_non_diffusive_1to2.load_state_dict(checkpoint['gen_non_diffusive_1to2_dict'])
-        gen_non_diffusive_2to1.load_state_dict(checkpoint['gen_non_diffusive_2to1_dict'])        
+        load_model_state(gen_diffusive_1, checkpoint['gen_diffusive_1_dict'])
+        load_model_state(gen_diffusive_2, checkpoint['gen_diffusive_2_dict'])
+        load_model_state(gen_non_diffusive_1to2, checkpoint['gen_non_diffusive_1to2_dict'])
+        load_model_state(gen_non_diffusive_2to1, checkpoint['gen_non_diffusive_2to1_dict'])        
         # load G
         
         optimizer_gen_diffusive_1.load_state_dict(checkpoint['optimizer_gen_diffusive_1'])
@@ -344,19 +245,19 @@ def train_syndiff(rank, gpu, args):
         optimizer_gen_non_diffusive_2to1.load_state_dict(checkpoint['optimizer_gen_non_diffusive_2to1'])
         scheduler_gen_non_diffusive_2to1.load_state_dict(checkpoint['scheduler_gen_non_diffusive_2to1'])          
         # load D
-        disc_diffusive_1.load_state_dict(checkpoint['disc_diffusive_1_dict'])
+        load_model_state(disc_diffusive_1, checkpoint['disc_diffusive_1_dict'])
         optimizer_disc_diffusive_1.load_state_dict(checkpoint['optimizer_disc_diffusive_1'])
         scheduler_disc_diffusive_1.load_state_dict(checkpoint['scheduler_disc_diffusive_1'])
 
-        disc_diffusive_2.load_state_dict(checkpoint['disc_diffusive_2_dict'])
+        load_model_state(disc_diffusive_2, checkpoint['disc_diffusive_2_dict'])
         optimizer_disc_diffusive_2.load_state_dict(checkpoint['optimizer_disc_diffusive_2'])
         scheduler_disc_diffusive_2.load_state_dict(checkpoint['scheduler_disc_diffusive_2'])   
         # load D_for cycle
-        disc_non_diffusive_cycle1.load_state_dict(checkpoint['disc_non_diffusive_cycle1_dict'])
+        load_model_state(disc_non_diffusive_cycle1, checkpoint['disc_non_diffusive_cycle1_dict'])
         optimizer_disc_non_diffusive_cycle1.load_state_dict(checkpoint['optimizer_disc_non_diffusive_cycle1'])
         scheduler_disc_non_diffusive_cycle1.load_state_dict(checkpoint['scheduler_disc_non_diffusive_cycle1'])
 
-        disc_non_diffusive_cycle2.load_state_dict(checkpoint['disc_non_diffusive_cycle2_dict'])
+        load_model_state(disc_non_diffusive_cycle2, checkpoint['disc_non_diffusive_cycle2_dict'])
         optimizer_disc_non_diffusive_cycle2.load_state_dict(checkpoint['optimizer_disc_non_diffusive_cycle2'])
         scheduler_disc_non_diffusive_cycle2.load_state_dict(checkpoint['scheduler_disc_non_diffusive_cycle2'])
         global_step = checkpoint['global_step']
@@ -447,14 +348,17 @@ def train_syndiff(rank, gpu, args):
             latent_z1 = torch.randn(batch_size, nz, device=device)
             latent_z2 = torch.randn(batch_size, nz, device=device)
             
-            x1_0_predict = gen_non_diffusive_2to1(real_data2)
-            x2_0_predict = gen_non_diffusive_1to2(real_data1)            
-            #x_tp1 is concatenated with source contrast and x_0_predict is predicted
-            x1_0_predict_diff = gen_diffusive_1(torch.cat((x1_tp1.detach(),x2_0_predict),axis=1), t1, latent_z1)
-            x2_0_predict_diff = gen_diffusive_2(torch.cat((x2_tp1.detach(),x1_0_predict),axis=1), t2, latent_z2)
-            #sampling q(x_t | x_0_predict, x_t+1)
-            x1_pos_sample = sample_posterior(pos_coeff, x1_0_predict_diff[:,[0],:], x1_tp1, t1)
-            x2_pos_sample = sample_posterior(pos_coeff, x2_0_predict_diff[:,[0],:], x2_tp1, t2)
+            # only D is updated here, so the generators run without building a
+            # graph; their gradients would be discarded by zero_grad() below
+            with torch.no_grad():
+                x1_0_predict = gen_non_diffusive_2to1(real_data2)
+                x2_0_predict = gen_non_diffusive_1to2(real_data1)
+                #x_tp1 is concatenated with source contrast and x_0_predict is predicted
+                x1_0_predict_diff = gen_diffusive_1(torch.cat((x1_tp1.detach(),x2_0_predict),axis=1), t1, latent_z1)
+                x2_0_predict_diff = gen_diffusive_2(torch.cat((x2_tp1.detach(),x1_0_predict),axis=1), t2, latent_z2)
+                #sampling q(x_t | x_0_predict, x_t+1)
+                x1_pos_sample = sample_posterior(pos_coeff, x1_0_predict_diff[:,[0],:], x1_tp1, t1)
+                x2_pos_sample = sample_posterior(pos_coeff, x2_0_predict_diff[:,[0],:], x2_tp1, t2)
             #D output for fake sample x_pos_sample
             output1 = disc_diffusive_1(x1_pos_sample, t1, x1_tp1.detach()).view(-1)
             output2 = disc_diffusive_2(x2_pos_sample, t2, x2_tp1.detach()).view(-1)       
@@ -489,8 +393,9 @@ def train_syndiff(rank, gpu, args):
             errD_cycle_real.backward(retain_graph=True)
             # train with fake
             
-            x1_0_predict = gen_non_diffusive_2to1(real_data2)
-            x2_0_predict = gen_non_diffusive_1to2(real_data1)
+            with torch.no_grad():
+                x1_0_predict = gen_non_diffusive_2to1(real_data2)
+                x2_0_predict = gen_non_diffusive_1to2(real_data1)
 
             D_cycle1_fake = disc_non_diffusive_cycle1(x1_0_predict).view(-1)
             D_cycle2_fake = disc_non_diffusive_cycle2(x2_0_predict).view(-1) 
@@ -577,10 +482,8 @@ def train_syndiff(rank, gpu, args):
             #cycle loss
             errG1_cycle=F.l1_loss(x1_0_predict_cycle,real_data1)
             errG2_cycle=F.l1_loss(x2_0_predict_cycle,real_data2)            
-            errG_cycle = errG1_cycle + errG2_cycle            
+            errG_cycle = errG1_cycle + errG2_cycle
 
-            torch.autograd.set_detect_anomaly(True)
-            
             errG = args.lambda_l1_loss*errG_cycle +  errG_adv + errG_cycle_adv + args.lambda_l1_loss*errG_L1
             errG.backward()
             
@@ -696,9 +599,9 @@ def train_syndiff(rank, gpu, args):
             
             x1_t = torch.cat((torch.randn_like(real_data),source_data),axis=1)
             #diffusion steps
-            fake_sample1 = sample_from_model(pos_coeff, gen_diffusive_1, args.num_timesteps, x1_t, T, args)
+            fake_sample1 = sample_from_model(pos_coeff, gen_diffusive_2, args.num_timesteps, x1_t, T, args)
 
-            
+
             fake_sample1 = to_range_0_1(fake_sample1) ; fake_sample1 = fake_sample1/fake_sample1.mean()
             real_data = to_range_0_1(real_data) ; real_data = real_data/real_data.mean()
             
@@ -718,15 +621,24 @@ def init_processes(rank, size, fn, args):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = args.master_address
     os.environ['MASTER_PORT'] = args.port_num
-    torch.cuda.set_device(args.local_rank)
     gpu = args.local_rank
-    dist.init_process_group(backend='nccl', init_method='env://', rank=rank, world_size=size)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(args.local_rank)
+
+    # A process group is only needed when the run actually spans processes.
+    # Setting one up unconditionally made single-GPU runs depend on NCCL and
+    # made CPU-only runs impossible.
+    if size > 1:
+        dist.init_process_group(backend='nccl', init_method='env://', rank=rank, world_size=size)
+
     fn(rank, gpu, args)
-    dist.barrier()
-    cleanup()  
+
+    if dist.is_initialized():
+        dist.barrier()
+        cleanup()
 
 def cleanup():
-    dist.destroy_process_group()    
+    dist.destroy_process_group()
 #%%
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('syndiff parameters')

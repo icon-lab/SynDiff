@@ -149,7 +149,11 @@ class Discriminator_small(nn.Module):
     out = self.conv4(h3,t_embed)
     
     batch, channel, height, width = out.shape
+    # the view below splits the batch into groups of this size, so it has to
+    # divide the batch evenly; fall back to the largest size that does
     group = min(batch, self.stddev_group)
+    while batch % group != 0:
+        group -= 1
     stddev = out.view(
             group, -1, self.stddev_feat, channel // self.stddev_feat, height, width
         )
@@ -221,7 +225,11 @@ class Discriminator_large(nn.Module):
     out = self.conv6(h,t_embed)
     
     batch, channel, height, width = out.shape
+    # the view below splits the batch into groups of this size, so it has to
+    # divide the batch evenly; fall back to the largest size that does
     group = min(batch, self.stddev_group)
+    while batch % group != 0:
+        group -= 1
     stddev = out.view(
             group, -1, self.stddev_feat, channel // self.stddev_feat, height, width
         )

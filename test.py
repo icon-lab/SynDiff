@@ -7,6 +7,8 @@ import os
 import torch.optim as optim
 import torchvision
 from backbones.ncsnpp_generator_adagn import NCSNpp
+from diffusion import (Posterior_Coefficients, get_time_schedule,
+                       sample_from_model)
 from dataset import CreateDatasetSynthesis
 
 import torch.nn.functional as F
@@ -19,144 +21,40 @@ def psnr(img1, img2):
     mse = torch.mean((img1 - img2) ** 2)
     return 20 * torch.log10(img1.max() / torch.sqrt(mse))
 
-        
-#%% Diffusion coefficients 
-def var_func_vp(t, beta_min, beta_max):
-    log_mean_coeff = -0.25 * t ** 2 * (beta_max - beta_min) - 0.5 * t * beta_min
-    var = 1. - torch.exp(2. * log_mean_coeff)
-    return var
-
-def var_func_geometric(t, beta_min, beta_max):
-    return beta_min * ((beta_max / beta_min) ** t)
-
-def extract(input, t, shape):
-    out = torch.gather(input, 0, t)
-    reshape = [shape[0]] + [1] * (len(shape) - 1)
-    out = out.reshape(*reshape)
-
-    return out
-
-def get_time_schedule(args, device):
-    n_timestep = args.num_timesteps
-    eps_small = 1e-3
-    t = np.arange(0, n_timestep + 1, dtype=np.float64)
-    t = t / n_timestep
-    t = torch.from_numpy(t) * (1. - eps_small)  + eps_small
-    return t.to(device)
-
-def get_sigma_schedule(args, device):
-    n_timestep = args.num_timesteps
-    beta_min = args.beta_min
-    beta_max = args.beta_max
-    eps_small = 1e-3
-   
-    t = np.arange(0, n_timestep + 1, dtype=np.float64)
-    t = t / n_timestep
-    t = torch.from_numpy(t) * (1. - eps_small) + eps_small
-    
-    if args.use_geometric:
-        var = var_func_geometric(t, beta_min, beta_max)
-    else:
-        var = var_func_vp(t, beta_min, beta_max)
-    alpha_bars = 1.0 - var
-    betas = 1 - alpha_bars[1:] / alpha_bars[:-1]
-    
-    first = torch.tensor(1e-8)
-    betas = torch.cat((first[None], betas)).to(device)
-    betas = betas.type(torch.float32)
-    sigmas = betas**0.5
-    a_s = torch.sqrt(1-betas)
-    return sigmas, a_s, betas
-
-#%% posterior sampling
-class Posterior_Coefficients():
-    def __init__(self, args, device):
-        
-        _, _, self.betas = get_sigma_schedule(args, device=device)
-        
-        #we don't need the zeros
-        self.betas = self.betas.type(torch.float32)[1:]
-        
-        self.alphas = 1 - self.betas
-        self.alphas_cumprod = torch.cumprod(self.alphas, 0)
-        self.alphas_cumprod_prev = torch.cat(
-                                    (torch.tensor([1.], dtype=torch.float32,device=device), self.alphas_cumprod[:-1]), 0
-                                        )               
-        self.posterior_variance = self.betas * (1 - self.alphas_cumprod_prev) / (1 - self.alphas_cumprod)
-        
-        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-        self.sqrt_recip_alphas_cumprod = torch.rsqrt(self.alphas_cumprod)
-        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1 / self.alphas_cumprod - 1)
-        
-        self.posterior_mean_coef1 = (self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1 - self.alphas_cumprod))
-        self.posterior_mean_coef2 = ((1 - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1 - self.alphas_cumprod))
-        
-        self.posterior_log_variance_clipped = torch.log(self.posterior_variance.clamp(min=1e-20))
-        
-def sample_posterior(coefficients, x_0,x_t, t):
-    
-    def q_posterior(x_0, x_t, t):
-        mean = (
-            extract(coefficients.posterior_mean_coef1, t, x_t.shape) * x_0
-            + extract(coefficients.posterior_mean_coef2, t, x_t.shape) * x_t
-        )
-        var = extract(coefficients.posterior_variance, t, x_t.shape)
-        log_var_clipped = extract(coefficients.posterior_log_variance_clipped, t, x_t.shape)
-        return mean, var, log_var_clipped
-    
-  
-    def p_sample(x_0, x_t, t):
-        mean, _, log_var = q_posterior(x_0, x_t, t)
-        
-        noise = torch.randn_like(x_t)
-        
-        nonzero_mask = (1 - (t == 0).type(torch.float32))
-
-        return mean + nonzero_mask[:,None,None,None] * torch.exp(0.5 * log_var) * noise
-            
-    sample_x_pos = p_sample(x_0, x_t, t)
-    
-    return sample_x_pos
-
-def sample_from_model(coefficients, generator, n_time, x_init, T, opt):
-    x = x_init[:,[0],:]
-    source = x_init[:,[1],:]
-    with torch.no_grad():
-        for i in reversed(range(n_time)):
-            t = torch.full((x.size(0),), i, dtype=torch.int64).to(x.device)
-          
-            t_time = t
-            latent_z = torch.randn(x.size(0), opt.nz, device=x.device)#.to(x.device)
-            x_0 = generator(torch.cat((x,source),axis=1), t_time, latent_z)
-            x_new = sample_posterior(coefficients, x_0[:,[0],:], x, t)
-            x = x_new.detach()
-        
-    return x
-
 
 def load_checkpoint(checkpoint_dir, netG, name_of_network, epoch,device = 'cuda:0'):
     checkpoint_file = checkpoint_dir.format(name_of_network, epoch)  
 
     checkpoint = torch.load(checkpoint_file, map_location=device)
     ckpt = checkpoint
-   
-    for key in list(ckpt.keys()):
-         ckpt[key[7:]] = ckpt.pop(key)
-    netG.load_state_dict(ckpt)
+
+    # Checkpoints carry one 'module.' prefix per parallel wrapper the saving
+    # run used: none for a single-process run, one for DistributedDataParallel.
+    # Blindly dropping the first 7 characters corrupted every key of an
+    # unprefixed checkpoint.
+    prefix = 'module.'
+    normalised = {}
+    for key, value in ckpt.items():
+        while key.startswith(prefix):
+            key = key[len(prefix):]
+        normalised[key] = value
+    netG.load_state_dict(normalised)
     netG.eval()
 #%%
 def sample_and_test(args):
     torch.manual_seed(42)
-    # device = 'cuda:0'
-    torch.cuda.set_device(args.gpu_chose)
-    device = torch.device('cuda:{}'.format(args.gpu_chose))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(args.gpu_chose)
+        device = torch.device('cuda:{}'.format(args.gpu_chose))
+    else:
+        device = torch.device('cpu')
     epoch_chosen=args.which_epoch
     
     to_range_0_1 = lambda x: (x + 1.) / 2.
 
     #loading dataset
     phase='test'
-    dataset=CreateDatasetSynthesis('test', args.input_path, args.contrast1, args.contrast2)
+    dataset=CreateDatasetSynthesis('test', args.input_path, args.contrast1, args.contrast2, image_size=args.image_size)
     data_loader = torch.utils.data.DataLoader(dataset,
                                                batch_size=1,
                                                shuffle=False,
@@ -180,13 +78,18 @@ def sample_and_test(args):
          
     save_dir = exp_path + "/generated_samples/epoch_{}".format(epoch_chosen)
     
-    crop = transforms.CenterCrop((256, 152))
+    # CreateDatasetSynthesis pads every volume out to 256x256; this crop undoes
+    # that padding. The defaults match the IXI/BRATS geometry the paper used --
+    # set --crop_h/--crop_w to your own slice size for other datasets.
+    crop = transforms.CenterCrop((args.crop_h, args.crop_w))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     loss1 = np.zeros((1,len(data_loader)))
     loss2 = np.zeros((1,len(data_loader)))
-    syn_im1=np.zeros((256,256,len(data_loader)))
-    syn_im2=np.zeros((256,256,len(data_loader)))
+    # collected per slice and stacked afterwards, so the stored volume always
+    # matches the cropped image size
+    syn_im1=[]
+    syn_im2=[]
     for iteration, (x , y) in enumerate(data_loader): 
         
         real_data = x.to(device, non_blocking=True)
@@ -204,7 +107,7 @@ def sample_and_test(args):
         fake_sample1 = crop(fake_sample1) 
         real_data = crop(real_data)
         source_data = crop(source_data) 
-        syn_im1[:,:,iteration]=np.squeeze(fake_sample1.cpu().numpy())
+        syn_im1.append(np.squeeze(fake_sample1.cpu().numpy()))
         
         loss1[0, iteration] = psnr(fake_sample1, real_data).cpu().numpy()
         print(str(iteration))
@@ -230,7 +133,7 @@ def sample_and_test(args):
         fake_sample2 = crop(fake_sample2) 
         real_data = crop(real_data)
         source_data = crop(source_data)
-        syn_im2[:,:,iteration]=np.squeeze(fake_sample2.cpu().numpy()) 
+        syn_im2.append(np.squeeze(fake_sample2.cpu().numpy())) 
         
         loss2[0, iteration] = psnr(fake_sample2, real_data).cpu().numpy()
         print(str(iteration))
@@ -242,6 +145,9 @@ def sample_and_test(args):
 
     print(np.nanmean(loss2))
     np.save('{}/psnr_values2.npy'.format(save_dir), loss2)
+
+    syn_im1 = np.stack(syn_im1, axis=-1)
+    syn_im2 = np.stack(syn_im2, axis=-1)
 
     f = h5py.File(save_dir + '/im_syn.mat',  "w")
     f.create_dataset('images_'+args.contrast1+'syn', data=syn_im1)
@@ -332,6 +238,10 @@ if __name__ == '__main__':
                         help='contrast selection for model')
     parser.add_argument('--contrast2', type=str, default='T2',
                         help='contrast selection for model')
+    parser.add_argument('--crop_h', type=int, default=256,
+                        help='height the padded output is cropped back to')
+    parser.add_argument('--crop_w', type=int, default=152,
+                        help='width the padded output is cropped back to')
     parser.add_argument('--which_epoch', type=int, default=50)
     parser.add_argument('--gpu_chose', type=int, default=0)
 

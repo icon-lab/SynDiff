@@ -2,3 +2,11 @@
 *pycache*
 saved_info/*
 saved_info
+
+# local environments and scratch output
+.venv/
+venv/
+.pytest_cache/
+
+# macOS
+.DS_Store

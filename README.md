@@ -14,18 +14,36 @@ Muzaffer Özbey*, Onat Dalmaz*, Salman UH Dar, Hasan A Bedel, Şaban Özturk, Al
 
 ```
 python>=3.6.9
-torch>=1.7.1
-torchvision>=0.8.2
-cuda=>11.2
+torch>=1.13
+torchvision>=0.14
+numpy
+h5py
+scikit-image
+```
+
+`torch>=1.13` is required because the resume path passes `weights_only` to
+`torch.load`; PyTorch 2.6 later flipped that argument's default to `True`,
+which is why it is now passed explicitly.
+
+### Optional: fused CUDA kernels
+`utils/op` ships hand-written CUDA kernels that are JIT-compiled on first
+import. Building them needs a CUDA toolchain and:
+
+```
+cuda>=11.2
 ninja
 python3.x-dev (apt install, x should match your python3 version, ex: 3.8)
 ```
+
+If any of these is missing, SynDiff warns once and falls back to equivalent
+pure-PyTorch implementations, so the code also runs on a CPU-only install.
 
 ## Installation
 - Clone this repo:
 ```bash
 git clone https://github.com/icon-lab/SynDiff
 cd SynDiff
+pip install -r requirements.txt
 ```
 
 ## Dataset
@@ -43,9 +61,19 @@ input_path/
   ├── data_test_contrast2.mat
 ```
 
-where .mat files has shape of (#images, width, height) and image values are between 0 and 1.0. 
+where the `contrast1`/`contrast2` parts of the file names are the values passed
+to `--contrast1` and `--contrast2`.
+
+Each `.mat` file is an HDF5 file holding a single variable named `data_fs` of
+shape `(#images, width, height)`, with image values in roughly `[0, 1]`.
+Volumes are zero-padded out to `--image_size` squared on load and rescaled to
+`[-1, 1]`, so neither dimension may exceed that size.
+
 ### Sample Data
-Sample toy data can also found under 'SynDiff_sample_data' folder of the repository. 
+Sample toy data can be found under the `SynDiff_sample_data` folder. Note that
+those two files are raw volumes (`T1.mat`, `T2.mat`, 25 slices each) rather
+than a ready-made split -- to run the commands below, split them into train /
+val / test parts and name the parts as shown above.
 
 
 
@@ -56,6 +84,16 @@ Sample toy data can also found under 'SynDiff_sample_data' folder of the reposit
 ```
 python3 train.py --image_size 256 --exp exp_syndiff --num_channels 2 --num_channels_dae 64 --ch_mult 1 1 2 2 4 4 --num_timesteps 4 --num_res_blocks 2 --batch_size 1 --contrast1 T1 --contrast2 T2 --num_epoch 500 --ngf 64 --embedding_type positional --use_ema --ema_decay 0.999 --r1_gamma 1. --z_emb_dim 256 --lr_d 1e-4 --lr_g 1.6e-4 --lazy_reg 10 --num_process_per_node 1 --save_content --local_rank 0 --input_path /input/path/for/data --output_path /output/for/results
 ```
+
+`--ngf` sets the channel width of the discriminators *and* of the translation
+networks, and `--image_size` sets both the network resolution and the grid the
+input volumes are padded to. The values above, `64` and `256`, are the ones
+used in the paper.
+
+`--num_process_per_node` controls the number of processes. With more than one
+a NCCL process group is set up and the networks are wrapped in
+`DistributedDataParallel`; with a single process neither is used, and the run
+falls back to CPU when no GPU is visible.
 
 <br />
 
@@ -69,6 +107,28 @@ We have released pretrained diffusive generators for [T1->PD and PD->T1](https:/
 ```
 python test.py --image_size 256 --exp exp_syndiff --num_channels 2 --num_channels_dae 64 --ch_mult 1 1 2 2 4 4 --num_timesteps 4 --num_res_blocks 2 --batch_size 1 --embedding_type positional  --z_emb_dim 256 --contrast1 T1  --contrast2 T2 --which_epoch 50 --gpu_chose 0 --input_path /input/path/for/data --output_path /output/for/results
 ```
+
+Synthesised images are written to
+`output_path/exp/generated_samples/epoch_<which_epoch>/`, both as JPEGs and
+collected into `im_syn.mat`. Before saving, each image is cropped back from
+the padded 256x256 grid; `--crop_h` and `--crop_w` set that size and default
+to `256 152`, the slice geometry used in the paper. Set them to your own
+slice size for other datasets.
+
+<br />
+
+## Tests
+
+A CPU test suite covers the diffusion coefficients, network shapes and
+gradients, dataset loading and checkpoint handling:
+
+```
+pip install -r requirements.txt
+python -m pytest tests/
+```
+
+Tests that compare the fused CUDA kernels against their pure-PyTorch
+fallbacks are skipped automatically when the extensions cannot be built.
 
 <br />
 <br />
